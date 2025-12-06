@@ -5,98 +5,162 @@ const axios = require("axios");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// CWA API 設定
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
-
-// 縣市名稱修正 Helper (CWA 使用 '臺' 而非 '台')
-const fixCityName = (city) => {
-  if (!city) return "臺北市"; // 預設值
-  return city.replace(/台/g, "臺");
-};
+app.use(express.urlencoded({ extended: true }));
 
 /**
- * 取得天氣預報 (支援動態縣市)
- * GET /api/weather?city=台中市
+ * 取得新北天氣預報
+ * CWA 氣象資料開放平臺 API
+ * 使用「一般天氣預報-今明 36 小時天氣預報」資料集
  */
-const getWeather = async (req, res) => {
+const getNewTaipeiWeather = async (req, res) => {
   try {
+    // 檢查是否有設定 API Key
     if (!CWA_API_KEY) {
-      return res.status(500).json({ error: "API Key Missing" });
+      return res.status(500).json({
+        error: "伺服器設定錯誤",
+        message: "請在 .env 檔案中設定 CWA_API_KEY",
+      });
     }
 
-    // 1. 取得並修正縣市名稱
-    const rawCity = req.query.city || "新北市";
-    const targetCity = fixCityName(rawCity);
-
-    // 2. 呼叫 CWA API
+    // 呼叫 CWA API - 一般天氣預報（36小時）
+    // API 文件: https://opendata.cwa.gov.tw/dist/opendata-swagger.html
     const response = await axios.get(
       `${CWA_API_BASE_URL}/v1/rest/datastore/F-C0032-001`,
       {
         params: {
           Authorization: CWA_API_KEY,
-          locationName: targetCity,
+          locationName: "新北市",
         },
       }
     );
 
+    // 取得新北市的天氣資料
     const locationData = response.data.records.location[0];
 
     if (!locationData) {
       return res.status(404).json({
-        success: false,
-        message: `找不到「${targetCity}」的資料，請確認縣市名稱是否正確。`,
+        error: "查無資料",
+        message: "無法取得新北市天氣資料",
       });
     }
 
-    // 3. 資料整理 (保持你原本的邏輯，稍微精簡)
+    // 整理天氣資料
     const weatherData = {
       city: locationData.locationName,
-      source: "CWA 中央氣象署",
+      updateTime: response.data.records.datasetDescription,
       forecasts: [],
     };
 
+    // 解析天氣要素
     const weatherElements = locationData.weatherElement;
-    // 取出時間長度 (通常是 3 個時段)
-    const timePeriods = weatherElements[0].time;
+    const timeCount = weatherElements[0].time.length;
 
-    // 使用 map 遍歷時間段
-    weatherData.forecasts = timePeriods.map((period, index) => {
+    for (let i = 0; i < timeCount; i++) {
       const forecast = {
-        startTime: period.startTime,
-        endTime: period.endTime,
+        startTime: weatherElements[0].time[i].startTime,
+        endTime: weatherElements[0].time[i].endTime,
+        weather: "",
+        rain: "",
+        minTemp: "",
+        maxTemp: "",
+        comfort: "",
+        windSpeed: "",
       };
 
-      // 填入各項數值
-      weatherElements.forEach((el) => {
-        const val = el.time[index].parameter;
-        switch (el.elementName) {
-          case "Wx": forecast.weather = val.parameterName; break;
-          case "PoP": forecast.rainProb = val.parameterName + "%"; break; // 機率 Probability of Precipitation
-          case "MinT": forecast.minTemp = val.parameterName + "°C"; break;
-          case "MaxT": forecast.maxTemp = val.parameterName + "°C"; break;
-          case "CI": forecast.comfort = val.parameterName; break;
-          // 注意：F-C0032-001 資料集通常不包含 WS (風速)，若需要風速需使用其他 API
+      weatherElements.forEach((element) => {
+        const value = element.time[i].parameter;
+        switch (element.elementName) {
+          case "Wx":
+            forecast.weather = value.parameterName;
+            break;
+          case "PoP":
+            forecast.rain = value.parameterName + "%";
+            break;
+          case "MinT":
+            forecast.minTemp = value.parameterName + "°C";
+            break;
+          case "MaxT":
+            forecast.maxTemp = value.parameterName + "°C";
+            break;
+          case "CI":
+            forecast.comfort = value.parameterName;
+            break;
+          case "WS":
+            forecast.windSpeed = value.parameterName;
+            break;
         }
       });
-      return forecast;
+
+      weatherData.forecasts.push(forecast);
+    }
+
+    res.json({
+      success: true,
+      data: weatherData,
     });
-
-    res.json({ success: true, data: weatherData });
-
   } catch (error) {
-    console.error("API Error:", error.message);
-    res.status(500).json({ error: "無法取得氣象資料" });
+    console.error("取得天氣資料失敗:", error.message);
+
+    if (error.response) {
+      // API 回應錯誤
+      return res.status(error.response.status).json({
+        error: "CWA API 錯誤",
+        message: error.response.data.message || "無法取得天氣資料",
+        details: error.response.data,
+      });
+    }
+
+    // 其他錯誤
+    res.status(500).json({
+      error: "伺服器錯誤",
+      message: "無法取得天氣資料，請稍後再試",
+    });
   }
 };
 
-app.get("/api/weather", getWeather);
+// Routes
+app.get("/", (req, res) => {
+  res.json({
+    message: "歡迎使用 CWA 天氣預報 API",
+    endpoints: {
+      newtaipei: "/api/weather/newtaipei",
+      health: "/api/health",
+    },
+  });
+});
 
-// Health Check
-app.get("/health", (req, res) => res.send("OK"));
+app.get("/api/health", (req, res) => {
+  res.json({ status: "OK", timestamp: new Date().toISOString() });
+});
+
+// 取得新北天氣預報
+app.get("/api/weather/newtaipei", getNewTaipeiWeather);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    error: "伺服器錯誤",
+    message: err.message,
+  });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: "找不到此路徑",
+  });
+});
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 伺服器運行已運作`);
+  console.log(`📍 環境: ${process.env.NODE_ENV || "development"}`);
 });
